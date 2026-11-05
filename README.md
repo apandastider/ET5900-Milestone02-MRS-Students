@@ -5,6 +5,8 @@
 This project provides the simulation for two TurtleBot 4 Lite robots and one UFactory Lite 6 fixed robot arm at a shared manufacturing workstation. **Each team writes only its own finite-state machine (FSM)** in `student_fsm/teamN_fsm.py`. The instructor provides the robot launchers, ROS action helper, and central coordinator. No retries or recovery FSMs are required.
 
 **Simplified scope:** predefined robot navigation goals and six-joint Lite 6 poses. No gripper, box handling, tray, MoveIt, or RViz is necessary.
+![Environment](images/env.png)
+
 
 ## 1. Teams and their assigned FSMs
 
