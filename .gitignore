@@ -1,0 +1,19 @@
+# Generated files and private materials
+.git/
+build/
+install/
+log/
+*.log
+__pycache__/
+*.pyc
+*.pyo
+*.bak
+*.backup
+*.orig
+*~
+.DS_Store
+.env
+.env.*
+config/debug_backup/
+*instructor*
+*reference_solution*

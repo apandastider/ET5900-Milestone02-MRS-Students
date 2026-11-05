@@ -1,0 +1,53 @@
+# ET 5900 — Milestone 2: named locations and Lite 6 arm poses
+# Navigation coordinates are the centers of the named floor pads in
+# milestone2_multi_robot_transfer(1).sdf (world coordinates, meters).
+# IMPORTANT: floor-pad yaw is 0 in the SDF; this is not a validated Nav2
+# approach heading. Test and adjust each docking yaw and stopping offset.
+# Position centers may also need adjustment to account for robot footprint.
+# Lite 6 poses are the six arm joint values supplied by the instructor (radians).
+# The seventh zero in the supplied HOME sequence was omitted because Lite 6
+# has six arm joints; verify it was not intended for a different joint.
+
+world: milestone2_multi_robot_transfer
+
+navigation_locations:
+  R1_HOME:
+    x: -3.0
+    y: -1.6
+    yaw: 0.0
+  R1_DOCK:
+    x: -0.85
+    y: 0.0
+    yaw: 0.0
+  R1_CLEAR:
+    x: -2.3
+    y: 1.45
+    yaw: 0.0
+  R2_HOME:
+    x: 3.0
+    y: -1.6
+    yaw: 3.14159
+  R2_DOCK:
+    x: 0.85
+    y: 0.0
+    yaw: 0.0
+  R2_DESTINATION:
+    x: 3.1
+    y: 1.55
+    yaw: 0.0
+
+lite6:
+  # Use controller joint order; confirm with `ros2 control list_controllers -v`.
+  joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
+  controller_action: /lite6/lite6_traj_controller/follow_joint_trajectory
+  # Above is the likely root-namespace action for the official /controller_manager
+  # setup. Confirm the exact action name with `ros2 action list`.
+  poses:
+    HOME: [0.0, -0.41, 0.57, 0.0, 0.43, 0.0]
+    R1_PICK: [-1.0, 0.89, 1.1, 0.7, 0.0, 0.0]
+    R2_PLACE: [1.38, 1.1, 1.31, 0.70, 0.0, 0.0]
+  motion_duration_seconds: 10.0  # starting value; validate safe motion
+
+# Simplified FSM sequence; no tray, gripper, or material-transfer simulation:
+# R1_HOME -> R1_DOCK -> Lite6 R1_PICK -> Lite6 HOME -> R1_CLEAR
+# -> R2_DOCK -> Lite6 R2_PLACE -> Lite6 HOME -> R2_DESTINATION
