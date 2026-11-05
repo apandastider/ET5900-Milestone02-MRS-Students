@@ -1,7 +1,7 @@
 # Install `lite6_jazzy_ws` — UFACTORY Lite 6
 
-**Course:** ET 5900 Multi-Robot Systems — Milestone 2  
-**Platform:** Ubuntu 24.04, ROS 2 Jazzy, Gazebo Harmonic  
+**Course:** ET 5900 Multi-Robot Systems — Milestone 2
+**Platform:** Ubuntu 24.04, ROS 2 Jazzy, Gazebo Harmonic
 **Purpose:** Build the UFACTORY Lite 6 ROS 2 packages used by Team 2 and the instructor's integrated simulation.
 
 > **Scope:** Milestone 2 controls the Lite 6 through predefined joint-space trajectories. The milestone does **not** require a gripper, object transfer, MoveIt planning, or RViz. The upstream UFACTORY workspace includes additional packages; they are not all used by the assignment.

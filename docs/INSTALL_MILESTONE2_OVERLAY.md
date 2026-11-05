@@ -1,7 +1,7 @@
 # Install `milestone2_overlay_ws` — iRobot Create 3 Gazebo Overlay
 
-**Course:** ET 5900 Multi-Robot Systems — Milestone 2  
-**Platform:** Ubuntu 24.04, ROS 2 Jazzy, Gazebo Harmonic  
+**Course:** ET 5900 Multi-Robot Systems — Milestone 2
+**Platform:** Ubuntu 24.04, ROS 2 Jazzy, Gazebo Harmonic
 **Purpose:** Provide the modified iRobot Create 3 Gazebo packages required by the two TurtleBot 4 Lite robots in the custom manufacturing world.
 
 > **Required for Teams 1 and 3 and instructor integration.** The course-provided source archive is attached to the GitHub **v0.1.0 release**. Do not use a generic fresh upstream clone in place of the supplied archive; it may lack the adjustments used for this milestone.
