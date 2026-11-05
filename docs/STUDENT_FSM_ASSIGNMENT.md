@@ -58,6 +58,6 @@ signals and enforces the real logical order.
 
 ## Submission
 
-Each team submits its completed `teamN_fsm.py`, a terminal execution log, and a
-brief explanation of its states, waiting condition(s), and successful actions.
+Each team submits its completed `teamN_fsm.py`, a terminal execution log, and a report that includes a
+brief explanation of its states, waiting condition(s), and successful actions. Please look into attached Doc in assignment for further instructions.
 Students **do not** submit or edit the coordinator or helper API.
