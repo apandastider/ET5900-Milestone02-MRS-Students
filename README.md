@@ -125,7 +125,7 @@ The coordinator calls `step(api, signals)` on each team's FSM in round-robin ord
 
 ## 7. AMCL/Nav2 localization checks (Teams 1 and 3)
 
-A previously observed failure was Nav2 `START_OUTSIDE_MAP` (error 203), caused by an incorrect AMCL estimate. The revised team launcher requests AMCL initialization at the configured HOME pose on fresh spawn and checks the estimated position against map bounds. **This fix still requires a fresh-start validation on the workstation; a successful old session is not proof.**
+A previously observed failure was Nav2 `START_OUTSIDE_MAP` (error 203), caused by an incorrect AMCL estimate. The revised team launcher requests AMCL initialization at the configured HOME pose on fresh spawn and checks the estimated position against map bounds. **Clean startup, localization, and Nav2 movement have been validated on the teaching workstation.**
 
 ```bash
 # Run only when the team robot has started
@@ -144,7 +144,7 @@ For Team 3, replace `robot1` with `robot2`. If the estimated position is outside
 
 - Robot 1 Nav2: `/robot1/navigate_to_pose`.
 - Robot 2 Nav2: `/robot2/navigate_to_pose`.
-- Lite 6 trajectory: typically `/lite6_traj_controller/follow_joint_trajectory` (confirm using `ros2 action list -t`).
+- Lite 6 trajectory: typically `/lite6/lite6_traj_controller/follow_joint_trajectory` (confirm using `ros2 action list -t`).
 - Robot odometry: `/robot1/odom` or `/robot2/odom`.
 - LiDAR: `/robot1/scan` or `/robot2/scan`.
 
@@ -154,7 +154,7 @@ Students should **only edit** their own `student_fsm/teamN_fsm.py`. The motion h
 
 Submit your `teamN_fsm.py`, terminal test log, and a concise explanation of states, WAIT conditions and action success checking. No recovery, retries, gripper, box-transfer simulation, RViz, or MoveIt required.
 
-Do not claim a successful integrated robot test based solely on `--simulate` or `--demo`. Fresh-start launcher/AMCL behavior, headless sensor rendering, and live student action-client behavior must be verified on the teaching workstation before distribution.
+Do not claim a successful integrated robot test based solely on `--simulate` or `--demo`. Individual robot launchers and robot motion have been validated on the teaching workstation. Headless operation, student-specific dependencies, and unfinished FSM action clients still require verification.
 
 ### Additional reading
 

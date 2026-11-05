@@ -13,6 +13,7 @@ import yaml
 import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 
 def pgm_dimensions(path: Path):
@@ -53,8 +54,15 @@ def main():
     rclpy.init()
     node = Node(f'{args.robot}_amcl_sanity_check')
     latest = []
-    pose_sub = node.create_subscription(PoseWithCovarianceStamped, f'/{args.robot}/amcl_pose',
-                             latest.append, 10)
+    pose_qos = QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+    pose_sub = node.create_subscription(
+        PoseWithCovarianceStamped, f'/{args.robot}/amcl_pose',
+        latest.append, pose_qos,
+    )
     try:
         deadline = time.monotonic() + args.timeout
         while time.monotonic() < deadline and not latest:

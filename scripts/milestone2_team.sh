@@ -1,269 +1,345 @@
 #!/usr/bin/env bash
-# ET 5900 Milestone 2: isolated, non-destructive Team 1 / 2 / 3 bringup.
-# Usage: bash scripts/milestone2_team.sh team1|team2|team3 [start|status|stop]
-# Team 1: robot1 + Nav2. Team 2: Lite6. Team 3: robot2 + Nav2.
-# Does NOT start the other team's robots; does NOT stop existing processes.
+# ET5900 student launcher - clean-session design, version 1.0
+# The world is SHARED but this launcher starts only the selected team's robot.
+# start: start fresh OR verify fully healthy existing owned session.
+#       NEVER repair or adopt a partial session (prevents duplicate bridges/nodes).
+# stop: stop ONLY process groups tracked in the student workspace.
+# status: read-only ROS/Gazebo checks.
 set -Eeo pipefail
 
 TEAM="${1:-}"
 MODE="${2:-start}"
-if [[ ! "$TEAM" =~ ^team[123]$ || ! "$MODE" =~ ^(start|status|stop)$ ]]; then
-  echo 'Usage: bash scripts/milestone2_team.sh team1|team2|team3 [start|status|stop]' >&2
+if [[ ! "$TEAM" =~ ^team[123]$ || ! "$MODE" =~ ^(start|stop|status)$ ]]; then
+  echo 'Usage: bash scripts/milestone2_team.sh team1|team2|team3 start|status|stop' >&2
   exit 2
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ORIGINAL="$ROOT/scripts/milestone2_start.sh"
-WORLD=milestone2_multi_robot_transfer
-CFG="$ROOT/config"
-MAP="${MRS_MAP:-$ROOT/maps/milestone2_map.yaml}"
-BASE="$HOME/.mrs_milestone2_integrated"
-LOGS="$BASE/logs"; PIDS="$BASE/pids"
+WS="$(cd "$ROOT/../.." && pwd)"
+BASE="$WS/.milestone2_runtime"
+PIDS="$BASE/pids"
+LOGS="$BASE/logs"
 ENV_FILE="$BASE/source_env.bash"
-mkdir -p "$LOGS" "$PIDS"
+CFG="$ROOT/config"
+MAP="$ROOT/maps/milestone2_map.yaml"
+WORLD=milestone2_multi_robot_transfer
+mkdir -p "$PIDS" "$LOGS"
 
-# Follow exactly the same workspace ordering used by the verified integrated launcher.
-if [[ ! -f "$ENV_FILE" ]]; then
-  cat > "$ENV_FILE" <<'EOF'
+# Always source THIS student checkout, never ~/mrs_milestone2_ws by name.
+cat > "$ENV_FILE" <<'ENV'
 source /opt/ros/jazzy/setup.bash
-for w in turtlebot4_ws lite6_jazzy_ws milestone2_overlay_ws mrs_milestone2_ws; do
+for w in turtlebot4_ws lite6_jazzy_ws milestone2_overlay_ws; do
   if [[ -f "$HOME/$w/install/setup.bash" ]]; then
     source "$HOME/$w/install/setup.bash"
   fi
 done
-EOF
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/install/setup.bash"
+ENV
+if [[ ! -f "$WS/install/setup.bash" ]]; then
+  echo "ERROR: student package is not built: $WS/install/setup.bash" >&2
+  exit 1
 fi
+# shellcheck source=/dev/null
 source "$ENV_FILE"
 
+if [[ "$TEAM" == team1 ]]; then ROBOT=robot1
+elif [[ "$TEAM" == team3 ]]; then ROBOT=robot2
+else ROBOT=lite6; fi
+
 log() { echo "$*"; }
-node_exists() { ros2 node list 2>/dev/null | grep -Fx "$1" >/dev/null; }
-topic_live() { timeout 8 ros2 topic echo "$1" --once >/dev/null 2>&1; }
-lifecycle_active() { [[ "$(timeout 8 ros2 lifecycle get "$1" 2>/dev/null || true)" == 'active [3]' ]]; }
-world_exists() { gz service -l 2>/dev/null | grep -Fx "/world/$WORLD/control" >/dev/null; }
-model_exists() {
-  gz model --list 2>/dev/null | sed -n 's/^[[:space:]]*-[[:space:]]*//p' | grep -Fx "$1" >/dev/null
+node_exists() { timeout 8 ros2 node list 2>/dev/null | grep -Fx "$1" >/dev/null; }
+topic_live() { timeout 10 ros2 topic echo "$1" --once >/dev/null 2>&1; }
+active() { [[ "$(timeout 8 ros2 lifecycle get "$1" 2>/dev/null || true)" == 'active [3]' ]]; }
+clock_count() {
+  local n
+  n="$(timeout 8 ros2 topic info /clock 2>/dev/null | awk '/^Publisher count:/ {print $3;exit}' || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  echo "$n"
 }
+one_clock() { [[ "$(clock_count)" == 1 ]] && topic_live /clock; }
+world_exists() { gz service -l 2>/dev/null | grep -Fx "/world/$WORLD/control" >/dev/null; }
+any_world() { gz service -l 2>/dev/null | grep -Eq '^/world/[^/]+/control$'; }
+model_exists() { gz model --list 2>/dev/null | sed -n 's/^[[:space:]]*-[[:space:]]*//p' | grep -Fx "$1" >/dev/null; }
 controller_active() {
-  local r="$1" c="$2" output
-  output="$(timeout 20 ros2 control list_controllers -c "/$r/controller_manager" 2>/dev/null || true)"
-  printf '%s\n' "$output" | grep -E "^${c}[[:space:]]+.*active" >/dev/null
+  local cm="$1" controller="$2" output
+  output="$(timeout 12 ros2 control list_controllers -c "$cm" 2>/dev/null || true)"
+  grep -Eq "^${controller}[[:space:]]+.*active" <<<"$output"
 }
 tf_ready() {
-  local r="$1" source="$2" target="$3" output
-  output="$(timeout 8 ros2 run tf2_ros tf2_echo "$source" "$target" \
-    --ros-args -r "/tf:=/$r/tf" -r "/tf_static:=/$r/tf_static" 2>&1 || true)"
+  local ns="$1" parent="$2" child="$3" output
+  output="$(timeout 8 ros2 run tf2_ros tf2_echo "$parent" "$child" \
+      --ros-args -r "/tf:=/$ns/tf" -r "/tf_static:=/$ns/tf_static" 2>&1 || true)"
   [[ "$output" == *'At time '* ]]
 }
 wait_for() {
-  local what="$1" tries="$2"; shift 2
+  local label="$1" tries="$2"; shift 2
   local i
   for ((i=0;i<tries;i++)); do
-    if "$@"; then log "READY: $what"; return 0; fi
+    if "$@"; then log "READY: $label"; return 0; fi
     sleep 2
   done
-  log "NOT READY: $what; details in $LOGS" >&2
+  log "ERROR: not ready: $label (logs: $LOGS)" >&2
   return 1
 }
-start_bg() {
+
+# Inspect pidfiles; do not trust PIDs without checking process-group ownership.
+leader_owned() {
+  local file="$1" pid pgid sid cmd label
+  [[ -f "$file" ]] || return 1
+  pid="$(cat "$file")"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  sid="$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [[ "$pid" == "$pgid" && "$pid" == "$sid" ]] || return 1
+  cmd="$(ps -o args= -p "$pid" 2>/dev/null || true)"
+  label="$(basename "$file" .pid)"
+  case "$label" in
+    world)                  [[ "$cmd" == *world.launch.py* ]];;
+    robot1|robot2)          [[ "$cmd" == *turtlebot4_spawn.launch.py* ]];;
+    lite6)                  [[ "$cmd" == *lite6_spawn.launch.py* ]];;
+    *_localization)         [[ "$cmd" == *localization.launch.py* ]];;
+    *_nav2)                 [[ "$cmd" == *nav2.launch.py* ]];;
+    *_scan_bridge|*_clock_bridge) [[ "$cmd" == *parameter_bridge* ]];;
+    *_odom_tf)              [[ "$cmd" == *milestone2_team_tf.py* ]];;
+    *)                      return 1;;
+  esac
+}
+owned_world() { leader_owned "$PIDS/world.pid"; }
+
+launch_bg() {
   local name="$1"; shift
-  local pidfile="$PIDS/team_${TEAM}_${name}.pid" pid
-  if [[ -f "$pidfile" ]]; then
-    pid="$(cat "$pidfile")"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-      log "REUSE: $name (PID $pid)"; return 0
+  local file="$PIDS/$name.pid"
+  if [[ -e "$file" ]]; then
+    if leader_owned "$file"; then
+      log "ERROR: $name is already running; use status or stop before a clean start." >&2
+      return 1
     fi
+    log "ERROR: stale/unverifiable PID file $file; refusing unsafe reuse." >&2
+    return 1
   fi
-  log "START: $name"
+  log "START: $name: $*"
   setsid bash -c 'source "$1"; shift; exec "$@"' _ "$ENV_FILE" "$@" \
-    >"$LOGS/team_${TEAM}_${name}.log" 2>&1 </dev/null &
-  echo "$!" > "$pidfile"
+    >"$LOGS/$name.log" 2>&1 </dev/null &
+  echo "$!" > "$file"
 }
 
-# Stop is intentionally scoped to the entire Milestone 2 session: the world
-# is shared, and stopping one robot alone is NOT a clean team-isolation test.
-stop_all() {
-  echo 'STOP: requesting shutdown of all recorded Milestone 2 processes.'
-  echo 'NOTE: this resets the shared world and may affect other running teams.'
-  # Team/safe wrappers create their own process groups with setsid.
-  # Validate the session leader before signalling to avoid a reused PID.
-  local f pid pgid sid
-  for f in "$PIDS"/team_*.pid "$PIDS"/safe_*.pid; do
+# One clean command for the user; child group shutdown is scoped to this WS.
+stop_session() {
+  local f pid count=0
+  for f in "$PIDS"/*.pid; do
     [[ -f "$f" ]] || continue
-    pid="$(cat "$f")"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-      pgid="$(ps -o pgid= -p "$pid" | tr -d ' ')"
-      sid="$(ps -o sid= -p "$pid" | tr -d ' ')"
-      if [[ "$pgid" == "$pid" && "$sid" == "$pid" ]]; then
-        echo "STOP: $(basename "$f") (process group $pid)"
-        kill -TERM -- "-$pid" 2>/dev/null || true
-      else
-        echo "SKIP: $f has PID $pid but is not an owned session leader"
+    if leader_owned "$f"; then
+      pid="$(cat "$f")"
+      log "STOP: $(basename "$f" .pid), process group $pid"
+      kill -TERM -- "-$pid" 2>/dev/null || true
+      ((count+=1))
+    else
+      pid="$(cat "$f")"
+      if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        log "ERROR: unverified LIVE PID file $f; not touching this process." >&2
+        return 1
       fi
+    fi
+  done
+  sleep 5
+  for f in "$PIDS"/*.pid; do
+    [[ -f "$f" ]] || continue
+    if leader_owned "$f"; then
+      log "ERROR: still running: $f. Inspect before retrying." >&2
+      return 1
     fi
     rm -f "$f"
   done
-  # Original launcher tracks the Gazebo world and robot spawn launchers.
-  bash "$ORIGINAL" stop
-  sleep 2
-  if world_exists; then
-    echo 'WARNING: Gazebo world still exists; inspect manual terminals before starting another team.' >&2
+  if world_exists || [[ "$(clock_count)" != 0 ]]; then
+    log 'ERROR: Gazebo world or /clock remains after stop. Some process is untracked.' >&2
+    log 'Inspect processes; do not launch another world on top of it.' >&2
     return 1
   fi
-  echo 'STOPPED: Milestone 2 recorded processes; world absent.'
+  log "STOPPED: student simulation ($count owned process groups)."
 }
 
-if [[ "$TEAM" == team2 ]]; then ROBOT=lite6
-elif [[ "$TEAM" == team1 ]]; then ROBOT=robot1
-else ROBOT=robot2; fi
+# Exactly one healthy, currently owned student session may be reused.
+healthy() {
+  owned_world && world_exists && one_clock || return 1
+  if [[ "$TEAM" == team2 ]]; then
+    model_exists lite6 || return 1
+    local cm
+    cm="$(arm_manager)" || return 1
+    controller_active "$cm" lite6_traj_controller || return 1
+  else
+    model_exists "$ROBOT/turtlebot4" &&
+    controller_active "/$ROBOT/controller_manager" joint_state_broadcaster &&
+    controller_active "/$ROBOT/controller_manager" diffdrive_controller &&
+    topic_live "/$ROBOT/odom" && topic_live "/$ROBOT/scan" &&
+    active "/$ROBOT/amcl" &&
+    active "/$ROBOT/controller_server" &&
+    active "/$ROBOT/planner_server" &&
+    active "/$ROBOT/bt_navigator" &&
+    tf_ready "$ROBOT" map "$ROBOT/base_link"
+  fi
+}
+arm_manager() {
+  if timeout 8 ros2 service list 2>/dev/null | grep -Fx '/lite6/controller_manager/list_controllers' >/dev/null; then
+    echo /lite6/controller_manager
+  elif timeout 8 ros2 service list 2>/dev/null | grep -Fx '/controller_manager/list_controllers' >/dev/null; then
+    echo /controller_manager
+  else return 1; fi
+}
 
 status() {
-  log "=== $TEAM / $ROBOT readiness (read only) ==="
-  world_exists && log 'OK: world' || log 'MISSING: world'
-  topic_live /clock && log 'OK: clock' || log 'MISSING: clock'
-  if [[ "$TEAM" == team2 ]]; then
-    model_exists lite6 && log 'OK: Lite 6 model' || log 'MISSING: Lite 6 model'
-    controller_active lite6 lite6_traj_controller && log 'OK: Lite 6 trajectory controller' || log 'MISSING: Lite 6 controller'
-  else
-    model_exists "$ROBOT/turtlebot4" && log "OK: $ROBOT model" || log "MISSING: $ROBOT model"
-    topic_live "/$ROBOT/odom" && log 'OK: odom' || log 'MISSING: odom'
-    topic_live "/$ROBOT/scan" && log 'OK: LiDAR' || log 'MISSING: LiDAR'
-    tf_ready "$ROBOT" map "$ROBOT/base_link" && log 'OK: map-to-base TF' || log 'MISSING: map-to-base TF'
-    lifecycle_active "/$ROBOT/amcl" && log 'OK: AMCL' || log 'MISSING: AMCL'
-    lifecycle_active "/$ROBOT/bt_navigator" && log 'OK: Nav2' || log 'MISSING: Nav2'
-  fi
+  log "=== $TEAM ($ROBOT) read-only status ==="
+  if owned_world && world_exists; then log 'OK: student world owned'; else log 'NOT READY: student world not owned/running'; fi
+  log "CLOCK: $(clock_count) publisher(s) (required: 1)"
+  if healthy; then log "PASS: $TEAM fully ready"; else log "NOT READY: $TEAM requires a clean startup"; return 1; fi
 }
 
-ensure_controller() {
-  local r="$1" c="$2"
-  if controller_active "$r" "$c"; then
-    log "REUSE: $r $c controller"
-  else
-    log "ACTIVATE: $r $c"
-    timeout 65 ros2 run controller_manager spawner "$c" \
-      -c "/$r/controller_manager" --controller-manager-timeout 40
-  fi
-  wait_for "$r $c controller" 15 controller_active "$r" "$c"
-}
-
-start() {
-  local fresh_spawn=0
-  [[ -f "$ORIGINAL" ]] || { log "Missing $ORIGINAL" >&2; exit 1; }
-  [[ -f "$ROOT/scripts/milestone2_team_tf.py" ]] || { log 'Missing scripts/milestone2_team_tf.py' >&2; exit 1; }
-  [[ -f "$ROOT/scripts/milestone2_team_amcl.py" ]] || { log 'Missing scripts/milestone2_team_amcl.py' >&2; exit 1; }
-  [[ -f "$ROOT/scripts/milestone2_team_pose_check.py" ]] || { log 'Missing scripts/milestone2_team_pose_check.py' >&2; exit 1; }
+start_fresh() {
+  [[ -f "$ROOT/launch/world.launch.py" && -f "$MAP" ]] || { log 'ERROR: world or map missing' >&2; return 1; }
+  [[ -f "$CFG/milestone2_locations_and_poses.yaml" ]] || { log 'ERROR: locations config missing' >&2; return 1; }
   if [[ "$TEAM" != team2 ]]; then
-    [[ -f "$MAP" && -f "$CFG/${ROBOT}_localization.yaml" && -f "$CFG/${ROBOT}_nav2.yaml" ]] || {
-      log 'Missing map or per-robot navigation YAML (copy the validated files into the repository)' >&2; exit 1;
+    [[ -f "$CFG/${ROBOT}_nav2.yaml" && -f "$CFG/${ROBOT}_localization.yaml" ]] || {
+      log "ERROR: missing $ROBOT Nav2/localization YAML" >&2; return 1;
     }
   fi
-
-  if world_exists; then log 'REUSE: Gazebo world'; else bash "$ORIGINAL" world; fi
-  wait_for 'Gazebo world' 30 world_exists
-
-  if topic_live /clock; then
-    log 'REUSE: /clock'
-  else
-    start_bg clock_bridge ros2 run ros_gz_bridge parameter_bridge \
-      "/world/$WORLD/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock" \
-      --ros-args -r "/world/$WORLD/clock:=/clock" -r __node:=milestone2_clock_bridge
+  if compgen -G "$PIDS/*.pid" >/dev/null; then
+    log 'ERROR: an existing student PID session is partially running or stale.' >&2
+    log "First run: bash scripts/milestone2_team.sh $TEAM stop" >&2
+    return 1
   fi
-  wait_for '/clock delivering messages' 12 topic_live /clock
+  if any_world || [[ "$(clock_count)" != 0 ]]; then
+    log 'ERROR: another Gazebo world or ROS clock exists. Refusing duplicate simulation.' >&2
+    log "Check: gz service -l | grep '/world/'; ros2 topic info /clock -v" >&2
+    return 1
+  fi
+  if node_exists "/$ROBOT/controller_manager" || node_exists "/$ROBOT/amcl" ||
+     node_exists "/$ROBOT/bt_navigator" ||
+     { [[ "$TEAM" == team2 ]] && node_exists /controller_manager; }; then
+    log "ERROR: untracked /$ROBOT ROS nodes already exist. Do not mix sessions." >&2
+    return 1
+  fi
 
-  # Spawn ONE team's robot only; reuse anything already in this Gazebo instance.
+  launch_bg world ros2 launch mrs_milestone2 world.launch.py
+  wait_for 'Gazebo world' 45 world_exists
+  # world.launch.py owns clock; never add another bridge.
+  wait_for '/clock exactly one live publisher' 35 one_clock
+
   if [[ "$TEAM" == team2 ]]; then
-    if model_exists lite6; then log 'REUSE: Lite 6'; else bash "$ORIGINAL" lite6; fi
-    wait_for '/lite6/controller_manager' 40 node_exists /lite6/controller_manager
-    ensure_controller lite6 joint_state_broadcaster
-    ensure_controller lite6 lite6_traj_controller
-    log 'SUCCESS: Team 2 Lite 6 only; no Nav2 and no TurtleBots started by this script.'
+    launch_bg lite6 ros2 launch mrs_milestone2 lite6_spawn.launch.py
+    wait_for "Lite6 Gazebo model" 40 model_exists lite6
+    local cm
+    for ((i=0;i<40;i++)); do
+      cm="$(arm_manager || true)"
+      [[ -n "$cm" ]] && break
+      sleep 2
+    done
+    [[ -n "$cm" ]] || { log 'ERROR: Lite6 controller manager not found' >&2; return 1; }
+    log "READY: arm controller manager $cm"
+    for controller in joint_state_broadcaster lite6_traj_controller; do
+      if ! controller_active "$cm" "$controller"; then
+        log "START: Lite6 controller $controller"
+        timeout 70 ros2 run controller_manager spawner "$controller"           -c "$cm" --controller-manager-timeout 40 || return 1
+      fi
+      wait_for "Lite6 $controller active" 20 controller_active "$cm" "$controller"
+    done
+    log 'SUCCESS: Team 2 ready. Test FollowJointTrajectory action separately.'
     return 0
   fi
 
-  if model_exists "$ROBOT/turtlebot4"; then
-    log "REUSE: $ROBOT"
+  # Fresh model. HOME coordinates are explicit and known: NO live-pose parser.
+  local spawn_x spawn_y spawn_yaw
+  if [[ "$ROBOT" == robot1 ]]; then
+    spawn_x=-3.0 spawn_y=-1.6 spawn_yaw=0.0
+    launch_bg robot1 ros2 launch turtlebot4_gz_bringup turtlebot4_spawn.launch.py \
+      model:=lite namespace:=robot1 "x:=$spawn_x" "y:=$spawn_y" z:=0.0 "yaw:=$spawn_yaw" \
+      slam:=false localization:=false nav2:=false rviz:=false
   else
-    bash "$ORIGINAL" "$ROBOT"
-    fresh_spawn=1
+    spawn_x=3.0 spawn_y=-1.6 spawn_yaw=3.14159
+    launch_bg robot2 ros2 launch turtlebot4_gz_bringup turtlebot4_spawn.launch.py \
+      model:=lite namespace:=robot2 "x:=$spawn_x" "y:=$spawn_y" z:=0.0 "yaw:=$spawn_yaw" \
+      slam:=false localization:=false nav2:=false rviz:=false
   fi
-  wait_for "/$ROBOT/controller_manager" 40 node_exists "/$ROBOT/controller_manager"
-  ensure_controller "$ROBOT" joint_state_broadcaster
-  ensure_controller "$ROBOT" diffdrive_controller
-  wait_for "/$ROBOT/odom" 20 topic_live "/$ROBOT/odom"
+  wait_for "$ROBOT model" 40 model_exists "$ROBOT/turtlebot4"
 
-  # Stock TB4 bridge targets /world/warehouse; our world requires this path.
-  if topic_live "/$ROBOT/scan"; then
-    log "REUSE: /$ROBOT/scan"
-  else
-    start_bg "${ROBOT}_scan_bridge" ros2 run ros_gz_bridge parameter_bridge \
-      "/world/$WORLD/model/$ROBOT/turtlebot4/link/rplidar_link/sensor/rplidar/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan" \
-      --ros-args \
-      -r "/world/$WORLD/model/$ROBOT/turtlebot4/link/rplidar_link/sensor/rplidar/scan:=/$ROBOT/scan" \
-      -r "__node:=${ROBOT}_scan_bridge"
+  # Remove stock TurtleBot charging dock; retain manufacturing station pads.
+  local dock="$ROBOT/standard_dock" reply attempt
+  for ((attempt=1; attempt<=15; attempt++)); do
+    if model_exists "$dock"; then
+      reply="$(timeout 8 gz service -s "/world/$WORLD/remove" \
+        --reqtype gz.msgs.Entity --reptype gz.msgs.Boolean \
+        --timeout 3000 --req "name: \\"$dock\\", type: MODEL" 2>&1 || true)"
+      if [[ "$reply" == *"data: true"* ]]; then
+        log "READY: removed charging dock $dock"
+      else
+        log "WARN: could not remove charging dock $dock"
+      fi
+      break
+    fi
+    sleep 1
+  done
+  wait_for "$ROBOT controller manager" 40 node_exists "/$ROBOT/controller_manager"
+  # Stock TurtleBot spawn handles controller loading. Do not spawn twice.
+  wait_for "$ROBOT joint_state_broadcaster active" 45 controller_active "/$ROBOT/controller_manager" joint_state_broadcaster
+  wait_for "$ROBOT diffdrive_controller active" 45 controller_active "/$ROBOT/controller_manager" diffdrive_controller
+  wait_for "$ROBOT odometry" 30 topic_live "/$ROBOT/odom"
+
+  # Explicit Gazebo topic matches this custom world; stock bridge points to /warehouse.
+  local scan="/world/$WORLD/model/$ROBOT/turtlebot4/link/rplidar_link/sensor/rplidar/scan"
+  launch_bg "${ROBOT}_scan_bridge" ros2 run ros_gz_bridge parameter_bridge \
+    "${scan}@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan" \
+    --ros-args -r "${scan}:=/$ROBOT/scan" -r "__node:=${ROBOT}_scan_bridge"
+  wait_for "$ROBOT LiDAR" 30 topic_live "/$ROBOT/scan"
+
+  if ! tf_ready "$ROBOT" "$ROBOT/odom" "$ROBOT/base_link"; then
+    launch_bg "${ROBOT}_odom_tf" python3 "$ROOT/scripts/milestone2_team_tf.py" --robot "$ROBOT"
   fi
-  wait_for "/$ROBOT/scan" 20 topic_live "/$ROBOT/scan"
+  wait_for "$ROBOT odom-to-base TF" 20 tf_ready "$ROBOT" "$ROBOT/odom" "$ROBOT/base_link"
+  wait_for "$ROBOT odom-to-lidar TF" 20 tf_ready "$ROBOT" "$ROBOT/odom" "$ROBOT/turtlebot4/rplidar_link/rplidar"
 
-  # Use native TF when it works; fallback only if missing. Never create duplicate relays.
-  if tf_ready "$ROBOT" "$ROBOT/odom" "$ROBOT/base_link"; then
-    log "REUSE: $ROBOT native odometry TF"
-  elif node_exists /milestone2_odom_tf_relay || node_exists "/${ROBOT}_team_odom_tf_relay"; then
-    log 'REUSE: existing odometry TF relay'
-  else
-    start_bg "${ROBOT}_odom_tf" python3 "$ROOT/scripts/milestone2_team_tf.py" --robot "$ROBOT"
-  fi
-  wait_for "$ROBOT odom-to-base TF" 15 tf_ready "$ROBOT" "$ROBOT/odom" "$ROBOT/base_link"
-  wait_for "$ROBOT odom-to-LiDAR TF" 15 tf_ready "$ROBOT" "$ROBOT/odom" "$ROBOT/turtlebot4/rplidar_link/rplidar"
+  # Start one robot's AMCL only, after sensors & TF are healthy.
+  launch_bg "${ROBOT}_localization" ros2 launch turtlebot4_navigation localization.launch.py \
+    "namespace:=/$ROBOT" use_sim_time:=true "map:=$MAP" \
+    "params:=$CFG/${ROBOT}_localization.yaml"
+  wait_for "$ROBOT map_server active" 40 active "/$ROBOT/map_server"
+  wait_for "$ROBOT AMCL active" 40 active "/$ROBOT/amcl"
 
-  # Remove only the simulation charging dock, not the teaching station pads.
-  if [[ "${MRS_REMOVE_CHARGING_DOCKS:-1}" == 1 ]] && model_exists "$ROBOT/standard_dock"; then
-    gz service -s "/world/$WORLD/remove" \
-      --reqtype gz.msgs.Entity --reptype gz.msgs.Boolean --timeout 3000 \
-      --req "name: \"$ROBOT/standard_dock\", type: MODEL" || true
-  fi
-
-  # Localization for this team only. Do NOT use original 'nav' or 'amcl' modes:
-  # both assume robot1 + robot2 exist simultaneously.
-  if node_exists "/$ROBOT/amcl" && node_exists "/$ROBOT/map_server"; then
-    log "REUSE: $ROBOT localization"
-  else
-    start_bg "${ROBOT}_localization" ros2 launch turtlebot4_navigation localization.launch.py \
-      "namespace:=/$ROBOT" use_sim_time:=true "map:=$MAP" \
-      "params:=$CFG/${ROBOT}_localization.yaml"
-  fi
-  wait_for "$ROBOT map_server active" 25 lifecycle_active "/$ROBOT/map_server"
-  wait_for "$ROBOT AMCL active" 25 lifecycle_active "/$ROBOT/amcl"
-
-  # TF existence alone does not imply a valid AMCL pose. On a fresh robot
-  # spawn, always initialize once. On reuse, reinitialize ONLY if AMCL is
-  # missing or outside the map. Never reset a robot simply because it moved.
-  local amcl_check=(python3 "$ROOT/scripts/milestone2_team_pose_check.py"
-    --robot "$ROBOT" --map "$MAP"
-    --config "$CFG/milestone2_locations_and_poses.yaml")
-  if (( fresh_spawn )) || ! "${amcl_check[@]}"; then
-    log "INIT: $ROBOT AMCL from configured HOME"
-    python3 "$ROOT/scripts/milestone2_team_amcl.py" \
-      --robot "$ROBOT" --config "$CFG/milestone2_locations_and_poses.yaml"
+  local i
+  for ((i=1;i<=3;i++)); do
+    log "INIT: $ROBOT AMCL from its FRESH spawn pose ($i/3)"
+    timeout 25 python3 "$ROOT/scripts/milestone2_student_amcl_seed.py" \
+      --robot "$ROBOT" --x "$spawn_x" --y "$spawn_y" --yaw "$spawn_yaw"
     timeout 10 ros2 service call "/$ROBOT/request_nomotion_update" \
       std_srvs/srv/Empty '{}' >/dev/null 2>&1 || true
-    wait_for "$ROBOT corrected AMCL near HOME" 10 \
-      "${amcl_check[@]}" --near-home 1.2
-  else
-    log "REUSE: $ROBOT AMCL estimate is inside map"
-  fi
+    if python3 "$ROOT/scripts/milestone2_team_pose_check.py" \
+      --robot "$ROBOT" --map "$MAP" \
+      --config "$CFG/milestone2_locations_and_poses.yaml" \
+      --near-home 1.2 --timeout 12; then break; fi
+  done
+  [[ "$i" -le 3 ]] || { log "ERROR: $ROBOT AMCL failed. See $LOGS/${ROBOT}_localization.log" >&2; return 1; }
   wait_for "$ROBOT map-to-base TF" 20 tf_ready "$ROBOT" map "$ROBOT/base_link"
 
-  if node_exists "/$ROBOT/bt_navigator"; then
-    log "REUSE: $ROBOT Nav2"
-  else
-    start_bg "${ROBOT}_nav2" ros2 launch turtlebot4_navigation nav2.launch.py \
-      "namespace:=/$ROBOT" use_sim_time:=true \
-      "params_file:=$CFG/${ROBOT}_nav2.yaml"
-  fi
-  wait_for "$ROBOT Nav2 navigator active" 35 lifecycle_active "/$ROBOT/bt_navigator"
-  log "SUCCESS: $TEAM ready; only $ROBOT was requested by this script."
+  launch_bg "${ROBOT}_nav2" ros2 launch turtlebot4_navigation nav2.launch.py \
+    "namespace:=/$ROBOT" use_sim_time:=true "params_file:=$CFG/${ROBOT}_nav2.yaml"
+  wait_for "$ROBOT Nav2 controller active" 45 active "/$ROBOT/controller_server"
+  wait_for "$ROBOT Nav2 planner active" 45 active "/$ROBOT/planner_server"
+  wait_for "$ROBOT Nav2 BT Navigator active" 45 active "/$ROBOT/bt_navigator"
+  [[ "$(clock_count)" == 1 ]] || { log 'ERROR: new duplicate clock publisher detected' >&2; return 1; }
+  log "SUCCESS: $TEAM ready; one robot and one clock."
 }
 
 case "$MODE" in
+  stop) stop_session ;;
   status) status ;;
-  start) start ;;
-  stop) stop_all ;;
+  start)
+    if world_exists; then
+      if healthy; then
+        log "SUCCESS: $TEAM already fully healthy; nothing started or modified."
+      else
+        log 'ERROR: existing Gazebo session is incomplete, unowned, or belongs to another team.' >&2
+        log "No automatic partial repair. To reset YOUR student session: bash scripts/milestone2_team.sh $TEAM stop" >&2
+        exit 1
+      fi
+    else
+      start_fresh
+    fi
+  ;;
 esac

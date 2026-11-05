@@ -2,11 +2,13 @@
 # ET 5900 — Lightweight Milestone 2 bringup (no RViz, MoveIt or visual transfer).
 # Supports: ./start.sh [all|world|robot1|robot2|bridges|lite6|controllers|nav|amcl|status|stop]
 set -Eeo pipefail
-BASE="${HOME}/.mrs_milestone2_integrated"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WS="$(cd "$ROOT/../.." && pwd)"
+BASE="$WS/.milestone2_runtime"
 LOGS="$BASE/logs"; PIDS="$BASE/pids"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-CFG="${CFG:-$HOME/mrs_milestone2_ws/src/mrs_milestone2/config/milestone2_locations_and_poses.yaml}"
-MAP="${MAP:-$HOME/mrs_milestone2_ws/maps/milestone2_map.yaml}"
+CFG="${CFG:-$ROOT/config/milestone2_locations_and_poses.yaml}"
+MAP="${MAP:-$ROOT/maps/milestone2_map.yaml}"
 WORLD=milestone2_multi_robot_transfer
 # Use official Lite6 launch instead if your custom one fails, for example:
 # LITE6_COMMAND='ros2 launch /absolute/path/to/lite6_beside_table_gazebo.launch.py' ./start.sh lite6
@@ -20,11 +22,11 @@ source /opt/ros/jazzy/setup.bash
 source "$HOME/turtlebot4_ws/install/setup.bash"
 source "$HOME/lite6_jazzy_ws/install/setup.bash"
 source "$HOME/milestone2_overlay_ws/install/setup.bash"
-source "$HOME/mrs_milestone2_ws/install/setup.bash"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/install/setup.bash"
 EOT
 for f in /opt/ros/jazzy/setup.bash "$HOME/turtlebot4_ws/install/setup.bash" \
   "$HOME/lite6_jazzy_ws/install/setup.bash" "$HOME/milestone2_overlay_ws/install/setup.bash" \
-  "$HOME/mrs_milestone2_ws/install/setup.bash"; do
+  "$WS/install/setup.bash"; do
   [[ -f "$f" ]] || { echo "Missing workspace setup: $f" >&2; exit 1; }
 done
 # shellcheck disable=SC1090
@@ -132,7 +134,7 @@ controllers() {
 }
 
 nav() {
-  local config_dir="$HOME/mrs_milestone2_ws/src/mrs_milestone2/config"
+  local config_dir="$ROOT/config"
 
   if [[ ! -f "$MAP" ]]; then
     echo "ERROR: map missing: $MAP" >&2
@@ -159,7 +161,7 @@ nav() {
 amcl() {
   [[ -f "$CFG" ]] || { echo "Missing config: $CFG" >&2; return 1; }
   if ! python3 -c "import mrs_milestone2.fsm_initialize_amcl" >/dev/null 2>&1; then
-    echo 'ERROR: build and source ~/mrs_milestone2_ws first.' >&2; return 1
+    echo 'ERROR: build and source the current course workspace first.' >&2; return 1
   fi
   for robot in robot1 robot2; do
     echo "Checking $robot map server is active..."
@@ -204,17 +206,25 @@ status() {
   echo "Logs in $LOGS"
 }
 stop_all() {
+  local file pid pgid sid
   for file in "$PIDS"/*.pid; do
     [[ -f "$file" ]] || continue
-    local pid; pid="$(cat "$file")"
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "STOP $(basename "$file" .pid): $pid"
-      kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    pid="$(cat "$file")"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      pgid="$(ps -o pgid= -p "$pid" | tr -d ' ')"
+      sid="$(ps -o sid= -p "$pid" | tr -d ' ')"
+      if [[ "$pgid" == "$pid" && "$sid" == "$pid" ]]; then
+        echo "STOP owned $(basename "$file" .pid): process group $pid"
+        kill -TERM -- "-$pid" 2>/dev/null || true
+      else
+        echo "SKIP unverified session $file (PID $pid)" >&2
+      fi
     fi
     rm -f "$file"
   done
-  echo 'Stopped processes recorded by this script. Inspect any independently started processes separately.'
+  echo 'Stopped only processes recorded and verified by this STUDENT runtime.'
 }
+
 all() {
   world
   echo 'Waiting briefly for Gazebo to initialize...'

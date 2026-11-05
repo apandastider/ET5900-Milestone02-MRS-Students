@@ -4,46 +4,54 @@
 set -Eeo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WS="$(cd "$ROOT/../.." && pwd)"
 ORIGINAL="$ROOT/scripts/milestone2_start.sh"
-BASE="${HOME}/.mrs_milestone2_integrated"
+BASE="$WS/.milestone2_runtime"
 LOGS="$BASE/logs"; PIDS="$BASE/pids"
 WORLD="milestone2_multi_robot_transfer"
 if [[ -f "$ROOT/maps/milestone2_map.yaml" ]]; then
   DEFAULT_MAP="$ROOT/maps/milestone2_map.yaml"
 else
-  DEFAULT_MAP="$HOME/mrs_milestone2_ws/maps/milestone2_map.yaml"
+  DEFAULT_MAP="$ROOT/maps/milestone2_map.yaml"
 fi
 MAP="${MRS_MAP:-$DEFAULT_MAP}"
 CFG="$ROOT/config"
 ENV_FILE="$BASE/source_env.bash"
 mkdir -p "$LOGS" "$PIDS"
 
-if [[ -f "$ENV_FILE" ]]; then
-  source "$ENV_FILE"
-else
-  source /opt/ros/jazzy/setup.bash
-  for w in turtlebot4_ws lite6_jazzy_ws milestone2_overlay_ws mrs_milestone2_ws; do
-    if [[ -f "$HOME/$w/install/setup.bash" ]]; then
-      source "$HOME/$w/install/setup.bash"
-    fi
-  done
-  if [[ "${1:-status}" == start ]]; then
-    cat > "$ENV_FILE" <<EOF
+cat > "$ENV_FILE" <<'EOF'
 source /opt/ros/jazzy/setup.bash
-for w in turtlebot4_ws lite6_jazzy_ws milestone2_overlay_ws mrs_milestone2_ws; do
-  if [[ -f "\$HOME/\$w/install/setup.bash" ]]; then
-    source "\$HOME/\$w/install/setup.bash"
+for w in turtlebot4_ws lite6_jazzy_ws milestone2_overlay_ws; do
+  if [[ -f "$HOME/$w/install/setup.bash" ]]; then
+    source "$HOME/$w/install/setup.bash"
   fi
 done
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/install/setup.bash"
 EOF
-  fi
-fi
+source "$ENV_FILE"
 
 log() { printf '%s\n' "$*"; }
 node_exists() { ros2 node list 2>/dev/null | grep -Fx "$1" >/dev/null; }
 topic_live() { timeout 8 ros2 topic echo "$1" --once >/dev/null 2>&1; }
 lifecycle_active() { [[ "$(timeout 8 ros2 lifecycle get "$1" 2>/dev/null || true)" == 'active [3]' ]]; }
 world_exists() { gz service -l 2>/dev/null | grep -Fx "/world/$WORLD/control" >/dev/null; }
+clock_publishers() {
+  local count
+  count="$(timeout 8 ros2 topic info /clock 2>/dev/null | awk '/^Publisher count:/ {print $3; exit}' || true)"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  printf '%s\n' "$count"
+}
+one_clock_live() { [[ "$(clock_publishers)" == 1 ]] && topic_live /clock; }
+owned_original_world() {
+  local p="$PIDS/world.pid" pid cmd pgid sid
+  [[ -f "$p" ]] || return 1
+  pid="$(cat "$p")"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(ps -o args= -p "$pid" 2>/dev/null || true)"
+  pgid="$(ps -o pgid= -p "$pid" | tr -d ' ')"
+  sid="$(ps -o sid= -p "$pid" | tr -d ' ')"
+  [[ "$pgid" == "$pid" && "$sid" == "$pid" && "$cmd" == *'world.launch.py'* ]]
+}
 model_exists() {
   # Match the model name, not substrings such as lite6_station_label.
   gz model --list 2>/dev/null | grep -Fx -- "    - $1" >/dev/null ||
@@ -95,7 +103,9 @@ controller_active() {
 status() {
   log '=== Milestone 2 diagnostics (READ ONLY) ==='
   if world_exists; then log 'OK: Gazebo world'; else log 'MISSING: Gazebo world'; fi
-  if topic_live /clock; then log 'OK: /clock'; else log 'MISSING: /clock'; fi
+  if one_clock_live; then log 'OK: /clock (one publisher)'; else
+    log "PROBLEM: /clock publisher count=$(clock_publishers)"
+  fi
   for r in robot1 robot2; do
     if topic_live "/$r/odom"; then log "OK: /$r/odom"; else log "MISSING: /$r/odom"; fi
     if topic_live "/$r/scan"; then log "OK: /$r/scan"; else log "MISSING: /$r/scan"; fi
@@ -125,18 +135,30 @@ start() {
   done
 
   # 1. One Gazebo world, do not create a second instance.
-  if world_exists; then log 'REUSE: Gazebo world'; else bash "$ORIGINAL" world; fi
+  local existing_clocks
+  existing_clocks="$(clock_publishers)"
+  if world_exists; then
+    if ! owned_original_world; then
+      log 'ERROR: existing world is not owned by this student runtime' >&2
+      return 1
+    fi
+    log 'REUSE: student Gazebo world'
+  else
+    if [[ "$existing_clocks" != 0 ]]; then
+      log "ERROR: $existing_clocks old /clock publisher(s); stop them first." >&2
+      return 1
+    fi
+    bash "$ORIGINAL" world
+  fi
   wait_for 'Gazebo world' 30 world_exists
 
-  # 2. Exactly one LIVE ROS /clock source. No restart of a working bridge.
-  if topic_live /clock; then
-    log 'REUSE: /clock'
-  else
-    start_bg clock_bridge ros2 run ros_gz_bridge parameter_bridge \
-      "/world/$WORLD/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock" \
-      --ros-args -r "/world/$WORLD/clock:=/clock" -r __node:=milestone2_clock_bridge
+  # 2. Only world.launch.py supplies /clock; never create another bridge.
+  existing_clocks="$(clock_publishers)"
+  if [[ "$existing_clocks" -gt 1 ]]; then
+    log "ERROR: $existing_clocks /clock publishers; stop duplicate bridges." >&2
+    return 1
   fi
-  wait_for '/clock delivering messages' 12 topic_live /clock
+  wait_for 'a single /clock publisher' 20 one_clock_live
 
   # 3. Spawn the two bases and the arm only if their models are absent.
   for r in robot1 robot2; do

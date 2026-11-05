@@ -18,7 +18,7 @@ If GitHub CLI (`gh`) is installed and you have repository access, you can instea
 mkdir -p ~/Downloads
 
 gh release download v0.1.0 \
-  -R apandastider/ET5900-Milestone02-MRS-Students \
+  -R apandastider/ET5900-Milestone02-MRS-Students-Students \
   --pattern milestone2_overlay_src.tar.gz \
   --dir ~/Downloads
 ```
