@@ -81,7 +81,15 @@ bash scripts/milestone2_team.sh team1 status
 # bash scripts/milestone2_team.sh team3 start
 # bash scripts/milestone2_team.sh team3 status
 ```
+To remove Charging Dock:
 
+```bash
+gz service -s /world/milestone2_multi_robot_transfer/remove \
+  --reqtype gz.msgs.Entity \
+  --reptype gz.msgs.Boolean \
+  --timeout 3000 \
+  --req 'name: "robot1/standard_dock", type: MODEL'
+```
 **Do not run** `milestone2_start_safe.sh` after a team launcher: that starts all three robots. A team's launcher starts only its assigned robot in a fresh world; when an existing integrated world is running, it may reuse processes. `stop` resets the recorded shared Milestone 2 simulation and may affect other running teams.
 
 Under SSH without a DISPLAY, the student `world.launch.py` selects Gazebo's headless (`-s`) mode. If LiDAR fails in headless mode, inspect the Gazebo sensor rendering logs rather than assuming localization works.
